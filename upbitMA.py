@@ -1,6 +1,7 @@
 # created : 2025-10-23  컨테이너 실행
 # modified : 2025-10-27 +-20% 알람 해제
 # modified : 2025-10-27 로그파일 월단위 설정
+# modified : 2025-10-27 메시지 형식 수정 (10%, 15%는 5%이상에 포함)
 
 import requests
 import time
@@ -103,13 +104,13 @@ def save_to_markdown(LOGFILE, summary):
     lines.append("| 구분 | 종목 수 |")
     lines.append("|------|----------|")
     lines.append(f"| 전체 종목 | {summary['total']} |")
-    lines.append(f"| +15% 이상 | {summary['rise_15']} |")
-    lines.append(f"| +10% 이상 | {summary['rise_10']} |")
+    lines.append(f"| (+15% 이상) | {summary['rise_15']} |")
+    lines.append(f"| (+10% 이상) | {summary['rise_10']} |")
     lines.append(f"| +5% 이상 | {summary['rise_5']} |")
     lines.append(f"| -5% ~ +5% | {summary['neutral']} |")
     lines.append(f"| -5% 이하 | {summary['fall_5']} |")
-    lines.append(f"| -10% 이하 | {summary['fall_10']} |")
-    lines.append(f"| -15% 이하 | {summary['fall_15']} |")
+    lines.append(f"| (-10% 이하) | {summary['fall_10']} |")
+    lines.append(f"| (-15% 이하) | {summary['fall_15']} |")
 
     lines.append("\n## 🚀 +15% 이상 상승 종목")
     if summary['rise_over_15']:
@@ -155,9 +156,9 @@ def main():
                     f"📉 경고: -15% 이하 하락 종목이 {fall_count}개 이상 발생!\n"
                     f"({now.strftime('%Y-%m-%d %H:%M')})\n"
                     f"전체 종목: {summary['total']}개\n"
-                    f"상승: +5%↑ {summary['rise_5']}개 | +10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개\n"
+                    f"상승: +5%↑ {summary['rise_5']}개 (+10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개)\n"
                     f"보합(-5%~+5%): {summary['neutral']}개\n"
-                    f"하락: -5%↓ {summary['fall_5']}개 | -10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개\n"
+                    f"하락: -5%↓ {summary['fall_5']}개 (-10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개)\n"
                     f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
                 )
                 send_telegram_message(msg)
@@ -167,9 +168,9 @@ def main():
                 msg = (
                     f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
                     f"전체 종목: {summary['total']}개\n"
-                    f"상승: +5%↑ {summary['rise_5']}개 | +10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개\n"
+                    f"상승: +5%↑ {summary['rise_5']}개 (+10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개)\n"
                     f"보합(-5%~+5%): {summary['neutral']}개\n"
-                    f"하락: -5%↓ {summary['fall_5']}개 | -10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개\n"
+                    f"하락: -5%↓ {summary['fall_5']}개 (-10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개)\n"
                     f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
                 )
                 send_telegram_message(msg)
