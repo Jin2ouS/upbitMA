@@ -1,0 +1,6 @@
+{
+    "ALARM_CHANNEL": "telegram",
+    "TELEGRAM_BOT_TOKEN": "텔레그램 봇 토큰",
+    "TELEGRAM_CHAT_ID": "텔레그램 챗 ID",
+    "MA_INTERVAL": 3600
+}
