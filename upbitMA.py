@@ -39,6 +39,15 @@ else:
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     raise ValueError("TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID가 .env에 필요합니다.")
 
+# 종목별 감시용 캐시: 마켓 매핑 + 전종목 시세 (API 호출 최소화)
+_MARKET_CACHE_TTL = 600  # 초 (10분)
+_market_map_cache = None
+_krw_markets_cache = None
+_market_cache_time = 0
+
+# 종목별 감시: 한 번 알림 보낸 (종목명, 감시사유)는 이후 감시 대상에서 제외 (감시중 X와 동일)
+_list_alert_sent = set()
+
 # ✅ 실행 시마다 날짜 확인 → 파일명 동적으로 갱신
 TODAY = datetime.date.today().strftime("%Y%m%d")
 TODAY_MONTH = datetime.date.today().strftime("%Y%m")
@@ -93,6 +102,55 @@ def build_name_market_map():
         name_map[mkt] = mkt
         name_map[f"{symbol}/KRW"] = mkt
     return name_map
+
+
+def get_cached_market_data():
+    """종목명 매핑 + KRW 마켓 목록 캐시. TTL 내에는 API 호출 없이 반환."""
+    global _market_map_cache, _krw_markets_cache, _market_cache_time
+    now_ts = time.time()
+    if (
+        _market_map_cache is not None
+        and _krw_markets_cache is not None
+        and (now_ts - _market_cache_time) < _MARKET_CACHE_TTL
+    ):
+        return _market_map_cache, _krw_markets_cache
+    raw = get_upbit_markets_all()
+    name_map = {}
+    krw_list = []
+    for m in raw:
+        mkt = m["market"]
+        if not mkt.startswith("KRW-"):
+            continue
+        krw_list.append(mkt)
+        korean = m.get("korean_name", "")
+        english = m.get("english_name", "")
+        symbol = mkt.replace("KRW-", "")
+        if korean:
+            name_map[korean] = mkt
+        if english:
+            name_map[english] = mkt
+        name_map[symbol] = mkt
+        name_map[mkt] = mkt
+        name_map[f"{symbol}/KRW"] = mkt
+    _market_map_cache = name_map
+    _krw_markets_cache = krw_list
+    _market_cache_time = now_ts
+    return name_map, krw_list
+
+
+def get_all_ticker_prices(markets):
+    """전종목 시세 1회 API 호출로 조회 → { market: 현재가(int) } 반환"""
+    if not markets:
+        return {}
+    url = "https://api.upbit.com/v1/ticker"
+    try:
+        resp = requests.get(url, params={"markets": ",".join(markets)}, timeout=15)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        return {r["market"]: int(float(r["trade_price"])) for r in data if r.get("trade_price") is not None}
+    except Exception:
+        return {}
 
 
 def load_excel_list(file_path):
@@ -180,7 +238,7 @@ def get_list_monitoring_status():
     active_rows = load_excel_list(EXCEL_LIST_PATH)
     if not active_rows:
         return None, "엑셀에 감시중(O) 행 없음"
-    name_market_map = build_name_market_map()
+    name_market_map, _ = get_cached_market_data()
     lines = []
     count = 0
     for row in active_rows:
@@ -209,18 +267,27 @@ def get_list_monitoring_status():
 
 
 def run_list_monitoring():
-    """LIST_FILE이 .env에 있고 해당 엑셀 파일이 있으면 종목별 감시 후 조건 충족 시 텔레그램 알림"""
+    """LIST_FILE이 .env에 있고 해당 엑셀 파일이 있으면 종목별 감시. 전종목 시세 1회 조회 후 캐시로 비교.
+    한 번 조건 충족 시 알림 전송 후 해당 (종목, 감시사유)는 감시 대상에서 제외(감시중 X와 동일)."""
+    global _list_alert_sent
     if EXCEL_LIST_PATH is None or not os.path.exists(EXCEL_LIST_PATH):
         return
     active_rows = load_excel_list(EXCEL_LIST_PATH)
     if not active_rows:
         return
-    name_market_map = build_name_market_map()
+    name_market_map, krw_markets = get_cached_market_data()
+    price_cache = get_all_ticker_prices(krw_markets)
+    if not price_cache:
+        print("[종목별 감시] 전종목 시세 조회 실패, 이번 주기 스킵")
+        return
     now = datetime.datetime.now()
     for row in active_rows:
         stock_name = str(row.get("종목명", "") or "").strip()
         reason = str(row.get("감시사유", "") or "").strip()
         condition = str(row.get("감시조건", "") or "").strip()
+        alert_key = (stock_name, reason)
+        if alert_key in _list_alert_sent:
+            continue
 
         market = name_market_map.get(stock_name)
         if not market:
@@ -239,18 +306,20 @@ def run_list_monitoring():
         if condition not in ("이상", "이하"):
             continue
 
-        current = get_current_price(market)
+        current = price_cache.get(market)
         if current is None:
             continue
-        time.sleep(0.08)
 
         condition_met = False
         if condition == "이상":
             condition_met = current >= watch_price
         else:
             condition_met = current <= watch_price
+
         if not condition_met:
             continue
+
+        _list_alert_sent.add(alert_key)
 
         msg = (
             f"🔔 [종목별 감시] {stock_name} - {reason}\n"
