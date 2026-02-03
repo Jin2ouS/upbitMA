@@ -1,2 +1,6 @@
 # 환경 설정 (토큰·키 등 포함, push 제외)
 .env
+
+# 종목별 감시 엑셀 (로컬/개인 설정)
+upbitMA.list.xlsx
+~$upbitMA.list.xlsx
