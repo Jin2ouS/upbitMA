@@ -171,12 +171,14 @@ def get_current_price(market, retries=2):
 
 
 def get_list_monitoring_status():
-    """종목별 감시현황 메시지 본문 생성. 미사용 시 None 반환."""
-    if EXCEL_LIST_PATH is None or not os.path.exists(EXCEL_LIST_PATH):
-        return None
+    """종목별 감시현황 메시지 본문 생성. 미사용 시 (None, 이유문자열) 반환."""
+    if EXCEL_LIST_PATH is None:
+        return None, "LIST_FILE 미설정"
+    if not os.path.exists(EXCEL_LIST_PATH):
+        return None, f"파일 없음: {EXCEL_LIST_PATH}"
     active_rows = load_excel_list(EXCEL_LIST_PATH)
     if not active_rows:
-        return None
+        return None, "엑셀에 감시중(O) 행 없음"
     name_market_map = build_name_market_map()
     lines = []
     count = 0
@@ -198,11 +200,11 @@ def get_list_monitoring_status():
         count += 1
         lines.append(f"  · {stock_name} | {reason} | {watch_price:,}원 {condition}")
     if not count:
-        return "종목별 감시: 등록 0건 (엑셀 경로 있음)"
+        return "종목별 감시: 등록 0건 (엑셀 경로 있음)", None
     body = "\n".join(lines[:30])  # 최대 30건
     if count > 30:
         body += f"\n  … 외 {count - 30}건"
-    return f"종목별 감시 현황 ({count}건)\n{body}"
+    return f"종목별 감시 현황 ({count}건)\n{body}", None
 
 
 def run_list_monitoring():
@@ -403,11 +405,13 @@ def main():
 
             # === ③ 종목별 감시현황 (매 실행 주기) ===
             try:
-                status = get_list_monitoring_status()
+                status, reason = get_list_monitoring_status()
                 if status:
                     send_telegram_message(f"📋 [upbitMA] {status}")
                 else:
-                    send_telegram_message("📋 [upbitMA] 종목별 감시: 미사용 (LIST_FILE 미설정 또는 파일 없음)")
+                    msg_why = f"📋 [upbitMA] 종목별 감시: 미사용 ({reason})"
+                    send_telegram_message(msg_why)
+                    print(f"[종목별 감시현황] {reason}")
             except Exception as e_status:
                 print(f"[종목별 감시현황 오류] {e_status}")
 

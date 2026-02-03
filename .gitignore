@@ -4,3 +4,6 @@
 # 종목별 감시 엑셀 (로컬/개인 설정)
 upbitMA.list.xlsx
 ~$upbitMA.list.xlsx
+
+# 스크립트 생성 로그 (월별 마크다운)
+upbitMA_*.md
