@@ -367,6 +367,8 @@ def main():
     signal.signal(signal.SIGINT, lambda s, f: (on_exit(), sys.exit(0)))
     signal.signal(signal.SIGTERM, lambda s, f: (on_exit(), sys.exit(0)))
 
+    last_daily_report_date = None  # 매일 8:30 리포트 중복 방지
+
     while True:
         try:
             # === 데이터 수집 및 분석 ===
@@ -377,9 +379,10 @@ def main():
             
             # === 현재 시각 확인 ===
             now = datetime.datetime.now()
-            hour = now.hour
+            hour, minute = now.hour, now.minute
+            today = now.date()
 
-            # -15% 이상 하락한 종목이 15개 이상 일 경우 메시지 전송
+            # === ① 이벤트: -15% 이하 하락 15개 이상 시에만 텔레그램 전송 ===
             if fall_count >= 15:
                 msg = (
                     f"📉 경고: -15% 이하 하락 종목이 {fall_count}개 이상 발생!\n"
@@ -392,30 +395,32 @@ def main():
                 )
                 send_telegram_message(msg)
 
-            # === ② 요약 리포트 (매 실행 주기) ===
-            msg_summary = (
-                f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
-                f"전체 종목: {summary['total']}개\n"
-                f"상승: +5%↑ {summary['rise_5']}개 (+10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개)\n"
-                f"보합(-5%~+5%): {summary['neutral']}개\n"
-                f"하락: -5%↓ {summary['fall_5']}개 (-10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개)\n"
-                f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
-            )
-            send_telegram_message(msg_summary)
+            # === ② 매일 8:30 정리 리포트 (해당일 1회만 텔레그램 전송) ===
+            is_after_830 = (hour > 8) or (hour == 8 and minute >= 30)
+            if is_after_830 and last_daily_report_date != today:
+                msg_summary = (
+                    f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
+                    f"전체 종목: {summary['total']}개\n"
+                    f"상승: +5%↑ {summary['rise_5']}개 (+10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개)\n"
+                    f"보합(-5%~+5%): {summary['neutral']}개\n"
+                    f"하락: -5%↓ {summary['fall_5']}개 (-10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개)\n"
+                    f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
+                )
+                send_telegram_message(msg_summary)
+                last_daily_report_date = today
+                print(f"[로그] 매일 8:30 정리 리포트 전송 완료 ({now.strftime('%Y-%m-%d %H:%M')})")
 
-            # === ③ 종목별 감시현황 (매 실행 주기) ===
+            # === ③ 종목별 감시현황: 로그에만 기록 (텔레그램 미전송) ===
             try:
                 status, reason = get_list_monitoring_status()
                 if status:
-                    send_telegram_message(f"📋 [upbitMA] {status}")
+                    print(f"[로그] 종목별 감시 현황: {status[:80]}..." if len(status) > 80 else f"[로그] 종목별 감시 현황: {status}")
                 else:
-                    msg_why = f"📋 [upbitMA] 종목별 감시: 미사용 ({reason})"
-                    send_telegram_message(msg_why)
-                    print(f"[종목별 감시현황] {reason}")
+                    print(f"[로그] 종목별 감시: {reason}")
             except Exception as e_status:
                 print(f"[종목별 감시현황 오류] {e_status}")
 
-            # === ④ 종목별 감시 실행 (감시가격 이상/이하 도달 시 알림) ===
+            # === ④ 이벤트: 개별 종목 감시가격 도달 시에만 텔레그램 알림 ===
             try:
                 run_list_monitoring()
             except Exception as e_list:
