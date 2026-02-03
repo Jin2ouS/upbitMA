@@ -47,6 +47,7 @@ _market_cache_time = 0
 
 # 종목별 감시: 한 번 알림 보낸 (종목명, 감시사유)는 이후 감시 대상에서 제외 (감시중 X와 동일)
 _list_alert_sent = set()
+_last_active_list_count = 0  # 대기 로그용: 엑셀 감시중(O) 건수
 
 # ✅ 실행 시마다 날짜 확인 → 파일명 동적으로 갱신
 TODAY = datetime.date.today().strftime("%Y%m%d")
@@ -269,12 +270,13 @@ def get_list_monitoring_status():
 def run_list_monitoring():
     """LIST_FILE이 .env에 있고 해당 엑셀 파일이 있으면 종목별 감시. 전종목 시세 1회 조회 후 캐시로 비교.
     한 번 조건 충족 시 알림 전송 후 해당 (종목, 감시사유)는 감시 대상에서 제외(감시중 X와 동일)."""
-    global _list_alert_sent
+    global _list_alert_sent, _last_active_list_count
     if EXCEL_LIST_PATH is None or not os.path.exists(EXCEL_LIST_PATH):
         return
     active_rows = load_excel_list(EXCEL_LIST_PATH)
     if not active_rows:
         return
+    _last_active_list_count = len(active_rows)
     name_market_map, krw_markets = get_cached_market_data()
     price_cache = get_all_ticker_prices(krw_markets)
     if not price_cache:
@@ -439,6 +441,7 @@ def main():
 
     last_daily_report_date = None  # 매일 8:30 리포트 중복 방지
     last_full_analysis_time = None  # 전체 종목 분석 마지막 실행 시각
+    first_list_status_telegram_sent = False  # 종목별 감시 현황은 첫 실행 시 1회만 텔레그램 전송
 
     while True:
         try:
@@ -488,12 +491,18 @@ def main():
                     last_daily_report_date = today
                     print(f"[로그] 매일 8:30 정리 리포트 전송 완료 ({now.strftime('%Y-%m-%d %H:%M')})")
 
-                # === 종목별 감시현황: 로그에만 (1시간마다) ===
+                # === 종목별 감시현황: 첫 실행 시 1회 텔레그램 전송, 이후는 로그만 ===
                 try:
                     status, reason = get_list_monitoring_status()
                     if status:
+                        if not first_list_status_telegram_sent:
+                            send_telegram_message(f"📋 [upbitMA] {status}")
+                            first_list_status_telegram_sent = True
                         print(f"[로그] 종목별 감시 현황: {status[:80]}..." if len(status) > 80 else f"[로그] 종목별 감시 현황: {status}")
                     else:
+                        if not first_list_status_telegram_sent:
+                            send_telegram_message(f"📋 [upbitMA] 종목별 감시: 미사용 ({reason})")
+                            first_list_status_telegram_sent = True
                         print(f"[로그] 종목별 감시: {reason}")
                 except Exception as e_status:
                     print(f"[종목별 감시현황 오류] {e_status}")
@@ -507,7 +516,11 @@ def main():
         except Exception as e:
             print(f"[오류 발생] {e}")
 
-        print(f"⏳ {LIST_MA_INTERVAL}초 대기 중...\n")
+        now = datetime.datetime.now()
+        next_run = now + datetime.timedelta(seconds=LIST_MA_INTERVAL)
+        watching = max(0, _last_active_list_count - len(_list_alert_sent))
+        excluded = len(_list_alert_sent)
+        print(f"[{now.strftime('%H:%M:%S')}] ⏳ {LIST_MA_INTERVAL}초 대기 중... 다음 {next_run.strftime('%H:%M:%S')} | 감시중 {watching}건 | 제외 {excluded}건")
         time.sleep(LIST_MA_INTERVAL)
 
 if __name__ == "__main__":
