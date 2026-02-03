@@ -2,28 +2,46 @@
 # modified : 2025-10-27 +-20% 알람 해제
 # modified : 2025-10-27 로그파일 월단위 설정
 # modified : 2025-10-27 메시지 형식 수정 (10%, 15%는 5%이상에 포함)
+# modified : 2026-02-03 종목별 감시(upbitMA.list.xlsx) 추가
+# modified : 2026-02-03 설정 전부 .env 사용
 
 import requests
 import time
 import datetime
 import os
 import sys
-import json
+import re
+import atexit
+import signal
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
-# 설정값 불러오기 (config.json)
-config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upbitMA.config.json")
-with open(config_path, encoding="utf-8") as f:
-    config = json.load(f)
-TELEGRAM_BOT_TOKEN = config.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = config.get("TELEGRAM_CHAT_ID")
-MA_INTERVAL = config.get("MA_INTERVAL")  # 초 단위
+from dotenv import load_dotenv
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+
+# 설정값 불러오기 (.env)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+MA_INTERVAL = int(os.getenv("MA_INTERVAL", "3600").strip() or "3600")
+LIST_FILE_RAW = os.getenv("LIST_FILE", "").strip()
+if LIST_FILE_RAW:
+    EXCEL_LIST_PATH = os.path.join(SCRIPT_DIR, LIST_FILE_RAW) if not os.path.isabs(LIST_FILE_RAW) else LIST_FILE_RAW
+else:
+    EXCEL_LIST_PATH = None
+
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID가 .env에 필요합니다.")
 
 # ✅ 실행 시마다 날짜 확인 → 파일명 동적으로 갱신
 TODAY = datetime.date.today().strftime("%Y%m%d")
 TODAY_MONTH = datetime.date.today().strftime("%Y%m")
 SCRIPT_FILENAME = os.path.splitext(os.path.basename(sys.argv[0]))[0]
-SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 # LOG_DIR_FILENAME = os.path.join(SCRIPT_DIR, f"{SCRIPT_FILENAME}_{TODAY}.md")
 LOG_DIR_FILENAME = os.path.join(SCRIPT_DIR, f"{SCRIPT_FILENAME}_{TODAY_MONTH}.md")
 
@@ -34,7 +52,9 @@ def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
-        requests.post(url, data=payload)
+        r = requests.post(url, data=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"[텔레그램 전송 실패] HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"[텔레그램 전송 실패] {e}")
 
@@ -43,6 +63,199 @@ def get_upbit_markets():
     url = "https://api.upbit.com/v1/market/all"
     res = requests.get(url).json()
     return [m['market'] for m in res if m['market'].startswith('KRW-')]
+
+
+def get_upbit_markets_all():
+    """업비트 마켓 전체 조회 (종목명→마켓코드 매핑용)"""
+    url = "https://api.upbit.com/v1/market/all"
+    resp = requests.get(url, params={"isDetails": "true"}, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def build_name_market_map():
+    """종목명/심볼 → 마켓코드(KRW-XXX) 매핑 생성"""
+    markets = get_upbit_markets_all()
+    name_map = {}
+    for m in markets:
+        mkt = m["market"]
+        if not mkt.startswith("KRW-"):
+            continue
+        korean = m.get("korean_name", "")
+        english = m.get("english_name", "")
+        symbol = mkt.replace("KRW-", "")
+        if korean:
+            name_map[korean] = mkt
+        if english:
+            name_map[english] = mkt
+        name_map[symbol] = mkt
+        name_map[mkt] = mkt
+        name_map[f"{symbol}/KRW"] = mkt
+    return name_map
+
+
+def load_excel_list(file_path):
+    """upbitMA.list.xlsx 형식 엑셀 로드 (감시중=O 행만 반환)
+    열: 감시중, 종목명, 감시사유, 감시가격, 감시조건, 일자, 기준가격, 비율, 수정일, 비고
+    """
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        print("[종목별 감시] openpyxl 미설치. pip install openpyxl")
+        return []
+    wb = load_workbook(file_path, data_only=True)
+    ws = wb.active
+    header = [cell.value for cell in ws[1]]
+    rows = []
+    for row in ws.iter_rows(min_row=2):
+        row_dict = {}
+        for idx, cell in enumerate(row):
+            if idx < len(header) and header[idx]:
+                row_dict[header[idx]] = cell.value
+        rows.append(row_dict)
+    # 감시중=O 인 행만
+    active = []
+    for r in rows:
+        status = str(r.get("감시중", "") or "").strip().upper()
+        name = str(r.get("종목명", "") or "").strip()
+        if status == "O" and name:
+            active.append(r)
+    return active
+
+
+def parse_watch_price(row):
+    """행에서 감시가격 계산. 감시가격(숫자) 또는 기준가격+비율.
+    반환: int 또는 None(파싱 실패/템플릿 행)
+    """
+    watch_raw = row.get("감시가격")
+    ref_raw = row.get("기준가격")
+    ratio_raw = row.get("비율")
+
+    # 감시가격이 숫자면 사용
+    if watch_raw is not None and str(watch_raw).strip() not in ("", "None", "NaT"):
+        s = str(watch_raw).replace("₩", "").replace(",", "").replace("원", "").strip()
+        if s and s.replace(".", "", 1).replace("-", "", 1).isdigit():
+            return int(float(s))
+
+    # 기준가격 + 비율로 계산 (기준가격이 숫자인 경우만)
+    if ref_raw is None or ratio_raw is None:
+        return None
+    ref_str = str(ref_raw).strip()
+    if not ref_str or ref_str in ("None", "NaT") or not ref_str.replace(".", "", 1).replace(",", "").replace("-", "", 1).isdigit():
+        return None  # "20일선" 등 텍스트는 미지원
+    try:
+        ref = float(str(ref_raw).replace("₩", "").replace(",", "").replace("원", "").strip())
+    except (ValueError, TypeError):
+        return None
+    try:
+        ratio = float(str(ratio_raw).replace("%", "").strip())
+    except (ValueError, TypeError):
+        return None
+    return int(ref * (1 + ratio / 100))
+
+
+def get_current_price(market, retries=2):
+    """단일 마켓 현재가 조회"""
+    url = "https://api.upbit.com/v1/ticker"
+    for _ in range(retries):
+        try:
+            resp = requests.get(url, params={"markets": market}, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    return int(float(data[0]["trade_price"]))
+        except Exception:
+            pass
+        time.sleep(0.1)
+    return None
+
+
+def get_list_monitoring_status():
+    """종목별 감시현황 메시지 본문 생성. 미사용 시 None 반환."""
+    if EXCEL_LIST_PATH is None or not os.path.exists(EXCEL_LIST_PATH):
+        return None
+    active_rows = load_excel_list(EXCEL_LIST_PATH)
+    if not active_rows:
+        return None
+    name_market_map = build_name_market_map()
+    lines = []
+    count = 0
+    for row in active_rows:
+        stock_name = str(row.get("종목명", "") or "").strip()
+        reason = str(row.get("감시사유", "") or "").strip()
+        condition = str(row.get("감시조건", "") or "").strip()
+        market = name_market_map.get(stock_name)
+        if not market:
+            for k, v in name_market_map.items():
+                if k.upper() == stock_name.upper():
+                    market = v
+                    break
+        if not market or condition not in ("이상", "이하"):
+            continue
+        watch_price = parse_watch_price(row)
+        if watch_price is None:
+            continue
+        count += 1
+        lines.append(f"  · {stock_name} | {reason} | {watch_price:,}원 {condition}")
+    if not count:
+        return "종목별 감시: 등록 0건 (엑셀 경로 있음)"
+    body = "\n".join(lines[:30])  # 최대 30건
+    if count > 30:
+        body += f"\n  … 외 {count - 30}건"
+    return f"종목별 감시 현황 ({count}건)\n{body}"
+
+
+def run_list_monitoring():
+    """LIST_FILE이 .env에 있고 해당 엑셀 파일이 있으면 종목별 감시 후 조건 충족 시 텔레그램 알림"""
+    if EXCEL_LIST_PATH is None or not os.path.exists(EXCEL_LIST_PATH):
+        return
+    active_rows = load_excel_list(EXCEL_LIST_PATH)
+    if not active_rows:
+        return
+    name_market_map = build_name_market_map()
+    now = datetime.datetime.now()
+    for row in active_rows:
+        stock_name = str(row.get("종목명", "") or "").strip()
+        reason = str(row.get("감시사유", "") or "").strip()
+        condition = str(row.get("감시조건", "") or "").strip()
+
+        market = name_market_map.get(stock_name)
+        if not market:
+            for k, v in name_market_map.items():
+                if k.upper() == stock_name.upper():
+                    market = v
+                    break
+        if not market:
+            print(f"[종목별 감시] 마켓 매핑 실패: {stock_name} ({reason})")
+            continue
+
+        watch_price = parse_watch_price(row)
+        if watch_price is None:
+            continue  # 템플릿/비율 행 등 스킵
+
+        if condition not in ("이상", "이하"):
+            continue
+
+        current = get_current_price(market)
+        if current is None:
+            continue
+        time.sleep(0.08)
+
+        condition_met = False
+        if condition == "이상":
+            condition_met = current >= watch_price
+        else:
+            condition_met = current <= watch_price
+        if not condition_met:
+            continue
+
+        msg = (
+            f"🔔 [종목별 감시] {stock_name} - {reason}\n"
+            f"   감시가격 {condition} {watch_price:,}원 | 현재가 {current:,}원\n"
+            f"   ({now.strftime('%Y-%m-%d %H:%M')})"
+        )
+        send_telegram_message(msg)
+        print(f"[종목별 감시] 알림 전송: {stock_name} ({reason})")
 
 def get_ticker_info(markets):
     """현재가, 전일가 기준으로 등락률 계산"""
@@ -138,6 +351,20 @@ def save_to_markdown(LOGFILE, summary):
     return len(summary['fall_below_15'])
 
 def main():
+    now_start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    send_telegram_message(
+        f"🟢 [upbitMA] 업비트 원화시장 감시 스크립트 시작\n({now_start})"
+    )
+    print(f"[시작] 텔레그램 알림 전송 완료 → {now_start}")
+
+    def on_exit():
+        t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        send_telegram_message(f"🔴 [upbitMA] 스크립트 종료\n({t})")
+
+    atexit.register(on_exit)
+    signal.signal(signal.SIGINT, lambda s, f: (on_exit(), sys.exit(0)))
+    signal.signal(signal.SIGTERM, lambda s, f: (on_exit(), sys.exit(0)))
+
     while True:
         try:
             # === 데이터 수집 및 분석 ===
@@ -162,18 +389,33 @@ def main():
                     f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
                 )
                 send_telegram_message(msg)
-                
-            # === ② 오전 8~9시에는 summary 요약 전송 ===
-            if 8 <= hour < 9:
-                msg = (
-                    f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
-                    f"전체 종목: {summary['total']}개\n"
-                    f"상승: +5%↑ {summary['rise_5']}개 (+10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개)\n"
-                    f"보합(-5%~+5%): {summary['neutral']}개\n"
-                    f"하락: -5%↓ {summary['fall_5']}개 (-10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개)\n"
-                    f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
-                )
-                send_telegram_message(msg)
+
+            # === ② 요약 리포트 (매 실행 주기) ===
+            msg_summary = (
+                f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
+                f"전체 종목: {summary['total']}개\n"
+                f"상승: +5%↑ {summary['rise_5']}개 (+10%↑ {summary['rise_10']}개 | +15%↑ {summary['rise_15']}개)\n"
+                f"보합(-5%~+5%): {summary['neutral']}개\n"
+                f"하락: -5%↓ {summary['fall_5']}개 (-10%↓ {summary['fall_10']}개 | -15%↓ {summary['fall_15']}개)\n"
+                f"파일: {os.path.basename(LOG_DIR_FILENAME)}"
+            )
+            send_telegram_message(msg_summary)
+
+            # === ③ 종목별 감시현황 (매 실행 주기) ===
+            try:
+                status = get_list_monitoring_status()
+                if status:
+                    send_telegram_message(f"📋 [upbitMA] {status}")
+                else:
+                    send_telegram_message("📋 [upbitMA] 종목별 감시: 미사용 (LIST_FILE 미설정 또는 파일 없음)")
+            except Exception as e_status:
+                print(f"[종목별 감시현황 오류] {e_status}")
+
+            # === ④ 종목별 감시 실행 (감시가격 이상/이하 도달 시 알림) ===
+            try:
+                run_list_monitoring()
+            except Exception as e_list:
+                print(f"[종목별 감시 오류] {e_list}")
 
         except Exception as e:
             print(f"[오류 발생] {e}")
