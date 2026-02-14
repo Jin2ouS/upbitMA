@@ -151,9 +151,9 @@ def main():
                 )
                 send_telegram_message(msg)
 
-            # ② 매일 8:30 정리 리포트
-            is_after_830 = (hour > 8) or (hour == 8 and minute >= 30)
-            if is_after_830 and last_daily_report_date != today:
+            # ② 매일 8시~9시(9시 이전) 정리 리포트
+            is_daily_report_window = (hour == 8)
+            if is_daily_report_window and last_daily_report_date != today:
                 msg_summary = (
                     f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
                     f"전체 종목: {summary['total']}개\n"
@@ -164,7 +164,7 @@ def main():
                 )
                 send_telegram_message(msg_summary)
                 last_daily_report_date = today
-                print(f"[로그] 매일 8:30 정리 리포트 전송 완료 ({now.strftime('%Y-%m-%d %H:%M')})")
+                print(f"[로그] 매일 8~9시 정리 리포트 전송 완료 ({now.strftime('%Y-%m-%d %H:%M')})")
 
         except Exception as e:
             print(f"[오류 발생] {e}")

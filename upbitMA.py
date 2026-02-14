@@ -439,7 +439,7 @@ def main():
     signal.signal(signal.SIGINT, lambda s, f: (on_exit(), sys.exit(0)))
     signal.signal(signal.SIGTERM, lambda s, f: (on_exit(), sys.exit(0)))
 
-    last_daily_report_date = None  # 매일 8:30 리포트 중복 방지
+    last_daily_report_date = None  # 매일 8~9시 리포트 중복 방지
     last_full_analysis_time = None  # 전체 종목 분석 마지막 실행 시각
     first_list_status_telegram_sent = False  # 종목별 감시 현황은 첫 실행 시 1회만 텔레그램 전송
 
@@ -476,9 +476,9 @@ def main():
                     )
                     send_telegram_message(msg)
 
-                # === ② 매일 8:30 정리 리포트 (해당일 1회만 텔레그램 전송) ===
-                is_after_830 = (hour > 8) or (hour == 8 and minute >= 30)
-                if is_after_830 and last_daily_report_date != today:
+                # === ② 매일 8시~9시(9시 이전) 정리 리포트 (해당일 1회만 텔레그램 전송) ===
+                is_daily_report_window = (hour == 8)
+                if is_daily_report_window and last_daily_report_date != today:
                     msg_summary = (
                         f"📊 업비트 원화시장 요약 리포트 ({now.strftime('%Y-%m-%d %H:%M')})\n"
                         f"전체 종목: {summary['total']}개\n"
@@ -489,7 +489,7 @@ def main():
                     )
                     send_telegram_message(msg_summary)
                     last_daily_report_date = today
-                    print(f"[로그] 매일 8:30 정리 리포트 전송 완료 ({now.strftime('%Y-%m-%d %H:%M')})")
+                    print(f"[로그] 매일 8~9시 정리 리포트 전송 완료 ({now.strftime('%Y-%m-%d %H:%M')})")
 
                 # === 종목별 감시현황: 첫 실행 시 1회 텔레그램 전송, 이후는 로그만 ===
                 try:
